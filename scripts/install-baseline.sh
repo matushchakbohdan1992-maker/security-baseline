@@ -45,7 +45,7 @@ if [ -z "$PROFILE" ]; then
   if grep -rqsIE --exclude-dir={node_modules,.git,Pods,.build,dist,build} \
        '(import openai|from openai|import anthropic|from anthropic|@anthropic-ai/sdk|"openai"|telegram|aiogram|ccxt|langchain|google\.generativeai)' . 2>/dev/null; then p+=(ai); fi
   [ ${#p[@]} -gt 0 ] || p=(web)
-  PROFILE="$(IFS=,; echo "${p[*]}")"
+  PROFILE="$(printf '%s,' "${p[@]}")"; PROFILE="${PROFILE%,}"
   echo "Профіль визначено автоматично: $PROFILE (змінити: --profile)"
 fi
 [[ "$PROFILE" =~ ^(web|mobile|ai)(,(web|mobile|ai))*$ ]] || { echo "Некоректний --profile: $PROFILE" >&2; exit 2; }
