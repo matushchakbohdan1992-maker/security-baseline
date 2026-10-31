@@ -1,0 +1,7 @@
+# security-baseline: власна конфігурація gitleaks цього репозиторію
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Навмисні фейкові секрети у тестових фікстурах правил"
+paths = ['''^tests/rules/''']

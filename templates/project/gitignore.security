@@ -1,0 +1,21 @@
+
+# --- security-baseline ---
+.env
+.env.*
+!.env.example
+!.env.sample
+*.pem
+*.p12
+*.key
+*.keystore
+*.jks
+*.mobileprovision
+id_rsa*
+id_ed25519*
+credentials.json
+service-account*.json
+*.sqlite
+*.db
+*.dump
+*.sql.gz
+.DS_Store

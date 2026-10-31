@@ -1,0 +1,397 @@
+# security-baseline: reusable security scan
+# Підключення в продукті: див. templates/project/.github/workflows/security.yml
+#
+# Принципи цього файлу:
+#  - усі сторонні дії закріплені за повним SHA коміту (теги можна перезаписати,
+#    як це сталося з trivy-action у березні 2026);
+#  - жоден сканер не отримує секретів: permissions лише contents: read;
+#  - кожен сканер у своєму job, щоб збій одного не ховав результати інших.
+
+name: security-scan
+
+on:
+  workflow_call:
+    inputs:
+      profile:
+        description: "Профілі через кому: web, mobile, ai (base вмикається завжди)"
+        type: string
+        default: "web"
+      fail-on-findings:
+        description: "Блокувати збірку при знахідках (false = лише звіт)"
+        type: boolean
+        default: true
+      scan-iac:
+        description: "Сканувати Dockerfile / docker-compose / Terraform / K8s"
+        type: boolean
+        default: true
+      image-ref:
+        description: "Docker-образ для сканування (порожньо = пропустити)"
+        type: string
+        default: ""
+      sbom:
+        description: "Генерувати SBOM"
+        type: boolean
+        default: true
+
+permissions: {}
+
+env:
+  GITLEAKS_VERSION: "8.30.1"
+  GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
+  SEMGREP_VERSION: "1.183.0"
+  TRIVY_VERSION: "v0.76.1"
+
+jobs:
+  secrets:
+    name: Secrets (gitleaks)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install gitleaks (checksum verified)
+        run: |
+          set -euo pipefail
+          url="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL -o /tmp/gitleaks.tgz "$url"
+          echo "${GITLEAKS_SHA256}  /tmp/gitleaks.tgz" | sha256sum -c -
+          tar -xzf /tmp/gitleaks.tgz -C /tmp gitleaks
+      - name: Scan
+        env:
+          FAIL: ${{ inputs.fail-on-findings }}
+          EVENT: ${{ github.event_name }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          set -uo pipefail
+          exit_code=1; [ "$FAIL" = "true" ] || exit_code=0
+          if [ "$EVENT" = "pull_request" ]; then
+            # PR: лише нові коміти; push/schedule: уся історія
+            range=(--log-opts="${BASE_SHA}..${HEAD_SHA}")
+          else
+            range=()
+          fi
+          /tmp/gitleaks git . "${range[@]}" --redact --no-banner \
+            --report-format sarif --report-path gitleaks.sarif \
+            --exit-code "$exit_code"
+          rc=$?
+          if [ $rc -ne 0 ]; then
+            {
+              echo "### 🔴 gitleaks: знайдено секрети"
+              echo "1. **Перевипустіть ключ** у консолі сервісу. Видалення з коду не допомагає: він уже в історії git."
+              echo "2. Перенесіть значення в секрети (.env / менеджер секретів)."
+              echo "3. Якщо це хибне спрацювання: додайте fingerprint у \`.gitleaksignore\` з коментарем."
+            } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ✅ gitleaks: секретів не знайдено" >> "$GITHUB_STEP_SUMMARY"
+          fi
+          exit $rc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: gitleaks-report
+          path: gitleaks.sarif
+          if-no-files-found: ignore
+          retention-days: 30
+
+  sast:
+    name: Code (semgrep)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: "3.12"
+      - name: Install semgrep
+        run: python -m pip install --disable-pip-version-check "semgrep==${SEMGREP_VERSION}"
+      - name: Write baseline rules
+        run: |
+          mkdir -p /tmp/sb
+          cat > /tmp/sb/baseline-rules.yml <<'RULES'
+          # @@BASELINE_RULES_BEGIN@@
+          rules:
+            # ---------- AI / LLM ----------
+            - id: sb-llm-output-to-code-execution
+              message: >-
+                Відповідь LLM потрапляє у виконання коду або shell. Модель можна змусити
+                згенерувати шкідливу команду через prompt injection. Ніколи не виконуйте
+                вивід моделі напряму; використовуйте білий список дій.
+              severity: ERROR
+              languages: [python]
+              metadata: {profile: ai, category: security}
+              mode: taint
+              pattern-sources:
+                - pattern: $C.chat.completions.create(...)
+                - pattern: $C.messages.create(...)
+                - pattern: $C.responses.create(...)
+                - pattern: $C.generate_content(...)
+              pattern-sinks:
+                - pattern: eval(...)
+                - pattern: exec(...)
+                - pattern: os.system(...)
+                - pattern: os.popen(...)
+                - patterns:
+                    - pattern: subprocess.$F(..., shell=True, ...)
+            - id: sb-llm-call-without-max-tokens-py
+              message: >-
+                Виклик LLM без обмеження токенів. Будь-хто, хто може викликати цей код,
+                може спалити бюджет API. Додайте max_tokens / max_completion_tokens.
+              severity: WARNING
+              languages: [python]
+              metadata: {profile: ai, category: cost}
+              patterns:
+                - pattern: $C.chat.completions.create(...)
+                - pattern-not: $C.chat.completions.create(..., max_tokens=$X, ...)
+                - pattern-not: $C.chat.completions.create(..., max_completion_tokens=$X, ...)
+            - id: sb-llm-call-without-max-tokens-js
+              message: >-
+                Виклик LLM без обмеження токенів. Додайте max_tokens / max_completion_tokens.
+              severity: WARNING
+              languages: [javascript, typescript]
+              metadata: {profile: ai, category: cost}
+              patterns:
+                - pattern: $C.chat.completions.create({...})
+                - pattern-not: "$C.chat.completions.create({..., max_tokens: $X, ...})"
+                - pattern-not: "$C.chat.completions.create({..., max_completion_tokens: $X, ...})"
+            - id: sb-llm-api-in-frontend
+              message: >-
+                Пряме звернення до платного API з клієнтського коду: ключ буде видно
+                будь-кому в DevTools. Викликайте API через свій бекенд.
+              severity: ERROR
+              languages: [javascript, typescript]
+              metadata: {profile: web, category: secrets}
+              paths:
+                include: ["**/src/**", "**/app/**", "**/pages/**", "**/components/**", "**/public/**", "**/client/**"]
+                exclude: ["**/api/**", "**/server/**", "**/*.server.*", "**/route.ts", "**/route.js"]
+              pattern-regex: https://api\.(openai|anthropic|stripe)\.com
+            # ---------- WEB ----------
+            - id: sb-secret-in-public-env-var
+              message: >-
+                Змінна з префіксом NEXT_PUBLIC_ / VITE_ / REACT_APP_ / EXPO_PUBLIC_ потрапляє
+                в публічний бандл. Секрет у ній бачить кожен відвідувач.
+              severity: ERROR
+              languages: [generic]
+              metadata: {profile: web, category: secrets}
+              paths:
+                exclude: ["*.example", "*.sample", "*.md"]
+              pattern-regex: \b(NEXT_PUBLIC|VITE|REACT_APP|EXPO_PUBLIC)_[A-Z0-9_]*(SECRET|PRIVATE|SERVICE_ROLE|PASSWORD)[A-Z0-9_]*\b
+            - id: sb-cors-wildcard-with-credentials
+              message: >-
+                CORS дозволяє будь-яке джерело разом із credentials. Вкажіть список своїх доменів.
+              severity: ERROR
+              languages: [python]
+              metadata: {profile: web, category: security}
+              pattern-either:
+                - pattern: CORSMiddleware(..., allow_origins=["*"], ..., allow_credentials=True, ...)
+                - pattern: $APP.add_middleware(CORSMiddleware, ..., allow_origins=["*"], ..., allow_credentials=True, ...)
+            # ---------- MOBILE / MAC ----------
+            - id: sb-secret-in-userdefaults
+              message: >-
+                Токен або пароль зберігається в UserDefaults (відкритий plist-файл).
+                Використовуйте Keychain.
+              severity: ERROR
+              languages: [swift]
+              metadata: {profile: mobile, category: secrets}
+              patterns:
+                - pattern: "UserDefaults.standard.set($V, forKey: $K)"
+                - metavariable-regex:
+                    metavariable: $K
+                    regex: (?i).*(token|password|passwd|secret|api_?key|session|credential).*
+            - id: sb-ats-arbitrary-loads
+              message: >-
+                NSAllowsArbitraryLoads вимикає App Transport Security: застосунок дозволяє
+                незашифрований HTTP. Приберіть або обмежте винятком для конкретного домену.
+              severity: WARNING
+              languages: [generic]
+              metadata: {profile: mobile, category: security}
+              paths:
+                include: ["*.plist"]
+              pattern-regex: <key>NSAllowsArbitraryLoads</key>\s*<true\s*/>
+            - id: sb-android-cleartext
+              message: >-
+                usesCleartextTraffic="true" дозволяє незашифрований HTTP у застосунку.
+              severity: WARNING
+              languages: [generic]
+              metadata: {profile: mobile, category: security}
+              paths:
+                include: ["AndroidManifest.xml"]
+              pattern-regex: android:usesCleartextTraffic\s*=\s*"true"
+            # ---------- BOTS ----------
+            - id: sb-telegram-token-literal
+              message: >-
+                Токен Telegram-бота прямо в коді. Перевипустіть його в @BotFather і
+                читайте з оточення.
+              severity: ERROR
+              languages: [generic]
+              metadata: {profile: ai, category: secrets}
+              paths:
+                exclude: ["*.example", "*.sample", "*.md"]
+              pattern-regex: \b\d{8,10}:AA[A-Za-z0-9_-]{33}\b
+          # @@BASELINE_RULES_END@@
+          RULES
+      - name: Scan
+        env:
+          PROFILE: ${{ inputs.profile }}
+          FAIL: ${{ inputs.fail-on-findings }}
+        run: |
+          set -uo pipefail
+          configs=(--config p/default --config p/secrets --config /tmp/sb/baseline-rules.yml)
+          case ",${PROFILE// /}," in *,web,*) configs+=(--config p/owasp-top-ten) ;; esac
+          extra=(); [ "$FAIL" = "true" ] && extra+=(--error)
+          semgrep scan "${configs[@]}" --metrics=off --severity ERROR --severity WARNING \
+            --sarif --output semgrep.sarif \
+            --text-output semgrep.txt \
+            "${extra[@]}" .
+          rc=$?
+          # Блокують лише ERROR; WARNING ідуть у звіт.
+          if [ "$FAIL" = "true" ]; then
+            errors=$(python - <<'PY'
+          import json
+          d = json.load(open("semgrep.sarif"))
+          print(sum(1 for r in d["runs"] for x in r.get("results", []) if x.get("level") == "error"))
+          PY
+          )
+            if [ "${errors:-0}" -gt 0 ]; then rc=1; else rc=0; fi
+          fi
+          {
+            echo "### Semgrep"
+            echo '```'
+            tail -n 60 semgrep.txt 2>/dev/null || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          exit $rc
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: semgrep-report
+          path: |
+            semgrep.sarif
+            semgrep.txt
+          if-no-files-found: ignore
+          retention-days: 30
+
+  dependencies:
+    name: Dependencies (osv-scanner)
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Scan
+        id: osv
+        continue-on-error: ${{ !inputs.fail-on-findings }}
+        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        with:
+          scan-args: |-
+            --recursive
+            --format=markdown
+            --output=osv-report.md
+            ./
+      - name: Summary
+        if: always()
+        run: |
+          if [ -s osv-report.md ]; then
+            { echo "### OSV-Scanner"; head -c 60000 osv-report.md; } >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "### ✅ OSV-Scanner: вразливих залежностей не знайдено" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always()
+        with:
+          name: osv-report
+          path: osv-report.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+  iac:
+    name: Infrastructure (trivy config)
+    if: ${{ inputs.scan-iac }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: config
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          exit-code: ${{ inputs.fail-on-findings && '1' || '0' }}
+          hide-progress: true
+          format: table
+          output: trivy-config.txt
+      - name: Summary
+        if: always()
+        run: |
+          { echo "### Trivy (IaC)"; echo '```'; head -c 60000 trivy-config.txt 2>/dev/null || echo "немає звіту"; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+
+  image:
+    name: Container image (trivy image)
+    if: ${{ inputs.image-ref != '' }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: ${{ inputs.image-ref }}
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: ${{ inputs.fail-on-findings && '1' || '0' }}
+          hide-progress: true
+          format: table
+
+  sbom:
+    name: SBOM (syft)
+    if: ${{ inputs.sbom }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 15
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          path: .
+          format: spdx-json
+          artifact-name: sbom.spdx.json
+          upload-release-assets: false

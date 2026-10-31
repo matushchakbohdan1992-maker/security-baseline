@@ -1,0 +1,23 @@
+# Локальні перевірки перед кожним комітом.
+# Встановлення один раз:  brew install pre-commit && pre-commit install
+repos:
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.30.1
+    hooks:
+      - id: gitleaks
+  - repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+      - id: detect-private-key
+      - id: check-added-large-files
+        args: ["--maxkb=1024"]
+      - id: check-merge-conflict
+      - id: forbid-new-submodules
+  - repo: local
+    hooks:
+      - id: no-env-files
+        name: Заборона комітити .env (лише .env.example)
+        entry: "Файли .env з секретами не можна комітити. Додайте значення в .env.example без секретів."
+        language: fail
+        files: '(^|/)\.env(\.[^/]*)?$'
+        exclude: '\.(example|sample|template)$'

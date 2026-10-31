@@ -1,0 +1,65 @@
+# security-baseline: reusable DAST (OWASP ZAP)
+# Сканує ЗАДЕПЛОЄНИЙ сайт або API. Запускайте лише проти власних доменів
+# (staging або prod, яким ви володієте).
+#
+# Baseline-скан пасивний: ходить по сайту як браузер і дивиться на заголовки,
+# cookies, витоки інформації. API-скан активніший, тому лише для staging.
+
+name: dast
+
+on:
+  workflow_call:
+    inputs:
+      target:
+        description: "URL вашого сайту (https://staging.example.com)"
+        type: string
+        required: true
+      mode:
+        description: "baseline (сайт, пасивно) або api (OpenAPI-специфікація, лише staging)"
+        type: string
+        default: baseline
+      api-format:
+        description: "Для mode=api: openapi | graphql | soap"
+        type: string
+        default: openapi
+      fail-on-findings:
+        description: "Падати при попередженнях ZAP"
+        type: boolean
+        default: false
+
+permissions: {}
+
+jobs:
+  zap:
+    name: DAST (OWASP ZAP ${{ inputs.mode }})
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Use project ZAP rules if present
+        id: rules
+        run: |
+          if [ -f .zap/rules.tsv ]; then echo "file=.zap/rules.tsv" >> "$GITHUB_OUTPUT"; fi
+      - name: ZAP baseline scan
+        if: ${{ inputs.mode == 'baseline' }}
+        uses: zaproxy/action-baseline@de8ad967d3548d44ef623df22cf95c3b0baf8b25 # v0.15.0
+        with:
+          target: ${{ inputs.target }}
+          rules_file_name: ${{ steps.rules.outputs.file }}
+          fail_action: ${{ inputs.fail-on-findings }}
+          allow_issue_writing: false
+          artifact_name: zap-baseline-report
+      - name: ZAP API scan
+        if: ${{ inputs.mode == 'api' }}
+        uses: zaproxy/action-api-scan@5158fe4d9d8fcc75ea204db81317cce7f9e5453d # v0.10.0
+        with:
+          target: ${{ inputs.target }}
+          format: ${{ inputs.api-format }}
+          rules_file_name: ${{ steps.rules.outputs.file }}
+          fail_action: ${{ inputs.fail-on-findings }}
+          allow_issue_writing: false
+          artifact_name: zap-api-report

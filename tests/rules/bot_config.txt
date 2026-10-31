@@ -1,0 +1,4 @@
+# ruleid: sb-telegram-token-literal
+TOKEN = "1234567890:AAHfakexxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+# ok: sb-telegram-token-literal
+TOKEN = os.environ["TELEGRAM_TOKEN"]

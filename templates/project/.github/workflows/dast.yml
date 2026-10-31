@@ -1,0 +1,20 @@
+# DAST: сканування задеплоєного сайту/API (лише ВАШ домен).
+# Увімкнути: змінна репозиторію DAST_TARGET = https://staging.ваш-домен.com
+name: DAST
+
+on:
+  schedule:
+    - cron: "41 4 1 * *"   # раз на місяць
+  workflow_dispatch:
+
+permissions: {}
+
+jobs:
+  zap:
+    if: ${{ vars.DAST_TARGET != '' }}
+    uses: __OWNER__/security-baseline/.github/workflows/dast.yml@main
+    permissions:
+      contents: read
+    with:
+      target: ${{ vars.DAST_TARGET }}
+      mode: baseline
