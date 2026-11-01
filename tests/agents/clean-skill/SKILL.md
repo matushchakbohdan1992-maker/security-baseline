@@ -1,6 +1,6 @@
 ---
 name: clean-skill
-description: Фікстура для self-test. Чистий скіл, на якому SkillSpector має дати 0 знахідок; через нього самоскан щоразу встановлює й запускає сканер.
+description: Self-test fixture. A clean skill that must produce zero SkillSpector findings, so the self-scan installs and runs the scanner on every change.
 ---
 
-Підсумуй CSV-файл, який надав користувач: порахуй суму доходу по кожному об'єкту й покажи таблицю.
+Summarize the CSV file the user provided: total the income for each property and show it as a table.
