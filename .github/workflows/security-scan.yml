@@ -32,6 +32,10 @@ on:
         description: "Генерувати SBOM"
         type: boolean
         default: true
+      scan-agents:
+        description: "Сканувати скіли (SKILL.md), налаштування .claude/ і MCP-конфіги"
+        type: boolean
+        default: true
 
 permissions: {}
 
@@ -40,6 +44,9 @@ env:
   GITLEAKS_SHA256: "551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb"
   SEMGREP_VERSION: "1.183.0"
   TRIVY_VERSION: "v0.76.1"
+  # SkillSpector не публікується в PyPI: беремо закріплений коміт, залежності строго з його uv.lock
+  SKILLSPECTOR_SHA: "6d0b7c849949cab9181e57798247f89e48ce5d6a" # v2.12.0
+  UV_VERSION: "0.11.32"
 
 jobs:
   secrets:
@@ -324,6 +331,121 @@ jobs:
         with:
           name: osv-report
           path: osv-report.md
+          if-no-files-found: ignore
+          retention-days: 30
+
+  agents:
+    name: AI agents (SkillSpector)
+    if: ${{ inputs.scan-agents }}
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 20
+    steps:
+      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+        if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
+        with:
+          egress-policy: audit
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Find skills and agent configs
+        id: find
+        run: |
+          set -euo pipefail
+          # Скіли = теки з SKILL.md; плюс налаштування Claude Code (хуки), його
+          # команди/агенти та MCP-конфіги: через них у репозиторій заходить чужий код.
+          {
+            find . \( -name .git -o -name node_modules \) -prune -o -type f -name SKILL.md -print \
+              | while read -r f; do dirname "$f"; done
+            find . \( -name .git -o -name node_modules \) -prune -o -type f \
+              \( -path '*/.claude/settings.json' -o -path '*/.claude/settings.local.json' \
+                 -o -name .mcp.json -o -path '*/.cursor/mcp.json' -o -path '*/.vscode/mcp.json' \) -print
+            find . \( -name .git -o -name node_modules \) -prune -o -type d \
+              \( -path '*/.claude/hooks' -o -path '*/.claude/commands' -o -path '*/.claude/agents' \) -print
+          } | sort -u > /tmp/agent-targets.txt
+          count=$(wc -l < /tmp/agent-targets.txt | tr -d ' ')
+          echo "count=${count}" >> "$GITHUB_OUTPUT"
+          if [ "$count" = "0" ]; then
+            echo "### ✅ AI-агенти: скілів, хуків і MCP-конфігів не знайдено" >> "$GITHUB_STEP_SUMMARY"
+          fi
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        if: ${{ steps.find.outputs.count != '0' }}
+        with:
+          python-version: "3.12"
+      - name: Install SkillSpector (pinned commit + lockfile)
+        if: ${{ steps.find.outputs.count != '0' }}
+        run: |
+          set -euo pipefail
+          python -m pip install --disable-pip-version-check "uv==${UV_VERSION}"
+          git init -q /tmp/skillspector
+          git -C /tmp/skillspector fetch -q --depth 1 https://github.com/NVIDIA/SkillSpector "${SKILLSPECTOR_SHA}"
+          git -C /tmp/skillspector checkout -q FETCH_HEAD
+          cd /tmp/skillspector
+          UV_PROJECT_ENVIRONMENT=/tmp/ss-venv uv sync -q --frozen --no-dev --python "$(command -v python)"
+          /tmp/ss-venv/bin/skillspector --version
+      - name: Scan
+        if: ${{ steps.find.outputs.count != '0' }}
+        env:
+          FAIL: ${{ inputs.fail-on-findings }}
+        run: |
+          set +e -uo pipefail  # runner запускає bash -e; коди виходу обробляємо самі
+          python - <<'PY'
+          import json, os, subprocess, sys
+          from pathlib import Path
+
+          # Лише статичний аналіз (--no-llm): нікуди не відправляє вміст і не потребує ключів.
+          ss = "/tmp/ss-venv/bin/skillspector"
+          fail = os.environ["FAIL"] == "true"
+          baseline = Path(".skillspector-baseline.yml")
+          targets = [t for t in Path("/tmp/agent-targets.txt").read_text().splitlines() if t]
+          out_dir = Path("agent-reports")
+          out_dir.mkdir(exist_ok=True)
+
+          rows, blocking, errors = [], 0, 0
+          for n, target in enumerate(targets, 1):
+              report = out_dir / f"report-{n}.json"
+              cmd = [ss, "scan", target, "--no-llm", "--format", "json", "--output", str(report)]
+              if baseline.is_file():
+                  cmd += ["--baseline", str(baseline)]
+              proc = subprocess.run(cmd, stdin=subprocess.DEVNULL, capture_output=True, text=True)
+              shown = target.replace("|", "\\|")
+              if proc.returncode == 2 or not report.is_file():
+                  errors += 1
+                  print(f"::error::SkillSpector не зміг просканувати {target}: {proc.stderr.strip()[-300:]}")
+                  rows.append(f"| `{shown}` | ⚠️ помилка сканування | – | – |")
+                  continue
+              data = json.loads(report.read_text())
+              issues = data.get("issues", [])
+              high = [i for i in issues if i.get("severity") in ("HIGH", "CRITICAL")]
+              blocking += len(high)
+              risk = data.get("risk_assessment", {})
+              mark = "🔴" if high else ("🟡" if issues else "✅")
+              rows.append(f"| {mark} `{shown}` | {risk.get('score', '?')} ({risk.get('severity', '?')}) | {len(high)} | {len(issues)} |")
+              for i in high:
+                  loc = i.get("location") or {}
+                  path = os.path.normpath(os.path.join(target if os.path.isdir(target) else os.path.dirname(target), loc.get("file", "")))
+                  print(f"::warning file={path},line={loc.get('start_line') or 1}::[{i.get('id')}] {i.get('category')}: {i.get('pattern')}")
+
+          summary = ["### AI-агенти (SkillSpector)", "", "| Що перевірено | Ризик 0–100 | HIGH+ | Усього знахідок |", "| --- | --- | --- | --- |", *rows, ""]
+          if blocking or errors:
+              summary += [
+                  "**Що робити:**",
+                  "1. Відкрийте артефакт `agent-reports`: там рядок, пояснення й порада щодо кожної знахідки.",
+                  "2. Чужий скіл чи MCP-сервер зі знахідками HIGH не ставте, поки не розберетесь, що він робить.",
+                  "3. Хибне спрацювання: `skillspector baseline <шлях> --no-llm -o -` і перенесіть потрібні записи в `fingerprints` файлу `.skillspector-baseline.yml` у корені репо; у `reason` напишіть, чому це безпечно.",
+              ]
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as fh:
+              fh.write("\n".join(summary) + "\n")
+
+          # Блокують лише HIGH/CRITICAL і збої сканування (fail-closed); MEDIUM/LOW ідуть у звіт.
+          sys.exit(1 if fail and (blocking or errors) else 0)
+          PY
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ always() && steps.find.outputs.count != '0' }}
+        with:
+          name: agent-reports
+          path: agent-reports/
           if-no-files-found: ignore
           retention-days: 30
 
