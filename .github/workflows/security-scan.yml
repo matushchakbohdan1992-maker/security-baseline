@@ -56,7 +56,7 @@ jobs:
       contents: read
     timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
@@ -116,7 +116,7 @@ jobs:
       contents: read
     timeout-minutes: 30
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
@@ -301,7 +301,7 @@ jobs:
       contents: read
     timeout-minutes: 20
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
@@ -311,7 +311,7 @@ jobs:
       - name: Scan
         id: osv
         continue-on-error: ${{ !inputs.fail-on-findings }}
-        uses: google/osv-scanner-action/osv-scanner-action@b1d267aea5211fa648d9d442fa64b90dbdcbdd36 # v2.7.0
+        uses: google/osv-scanner-action/osv-scanner-action@32d3cd482bdadfb38b186c0ad1b031902d55d932 # v2.7.1
         with:
           scan-args: |-
             --recursive
@@ -342,7 +342,7 @@ jobs:
       contents: read
     timeout-minutes: 20
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
@@ -457,7 +457,7 @@ jobs:
       contents: read
     timeout-minutes: 20
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
@@ -487,7 +487,7 @@ jobs:
       contents: read
     timeout-minutes: 20
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
@@ -510,7 +510,7 @@ jobs:
       contents: read
     timeout-minutes: 15
     steps:
-      - uses: step-security/harden-runner@46b06cea07f9e64621fdf066ba77ac6915163d43 # v2.22.3
+      - uses: step-security/harden-runner@1d88384fd173af6ecb012dfd0264a306b711241a # v2.22.4
         if: ${{ !github.event.repository.private }}  # безкоштовно лише для публічних репо
         with:
           egress-policy: audit
